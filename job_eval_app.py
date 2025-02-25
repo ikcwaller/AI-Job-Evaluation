@@ -2,6 +2,7 @@ import openai
 import streamlit as st
 import pandas as pd
 import requests
+import os
 from io import BytesIO
 
 # GitHub Raw URL for Excel file (Replace 'your-username' and 'your-repo-name')
@@ -50,7 +51,13 @@ def main():
 
 def evaluate_job(job_desc):
     """AI-powered function to analyze job complexity and assign an IPE level."""
-    client = openai.OpenAI()  # Ensure correct OpenAI client initialization
+    
+    # Securely get API key from environment variable
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("🚨 Missing OpenAI API Key. Set the OPENAI_API_KEY environment variable.")
+    
+    client = openai.OpenAI(api_key=api_key)
     
     prompt = f"""
     You are an HR expert in job evaluation using the IPE methodology.
