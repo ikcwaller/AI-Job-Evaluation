@@ -71,7 +71,7 @@ def evaluate_job(job_desc):
     """
     
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": "You are an AI specialized in Job Evaluation."},
             {"role": "user", "content": prompt}
