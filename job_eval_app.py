@@ -50,7 +50,7 @@ def main():
 
 def evaluate_job(job_desc):
     """AI-powered function to analyze job complexity and assign an IPE level."""
-    openai.api_key = "your_api_key"  # Replace with actual API Key
+    client = openai.OpenAI()  # Ensure correct OpenAI client initialization
     
     prompt = f"""
     You are an HR expert in job evaluation using the IPE methodology.
@@ -63,13 +63,15 @@ def evaluate_job(job_desc):
     - Suggested Job Family & Stream (using provided Job Architecture framework)
     """
     
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "system", "content": "You are an AI specialized in Job Evaluation."},
-                  {"role": "user", "content": prompt}]
+        messages=[
+            {"role": "system", "content": "You are an AI specialized in Job Evaluation."},
+            {"role": "user", "content": prompt}
+        ]
     )
     
-    return response["choices"][0]["message"]["content"]
+    return response.choices[0].message.content
 
 if __name__ == "__main__":
     main()
