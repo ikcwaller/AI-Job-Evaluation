@@ -1,10 +1,31 @@
 import openai
 import streamlit as st
 import pandas as pd
+import requests
+from io import BytesIO
 
-# Load IPE criteria from the Excel file
-file_path = "/mnt/data/IPE_Calculator_HFG_HH.xlsm"
-xls = pd.ExcelFile(file_path)
+# GitHub Raw URL for Excel file (Replace 'your-username' and 'your-repo-name')
+github_excel_url = "https://raw.githubusercontent.com/ikcwaller/AI-Job-Evaluation/main/IPE_Calculator_HFG_HH.xlsx"
+
+# Fetch the file from GitHub and verify it loads correctly
+response = requests.get(github_excel_url)
+
+if response.status_code == 200:
+    file_content = BytesIO(response.content)
+    
+    try:
+        xls = pd.ExcelFile(file_content)
+        print("✅ File downloaded successfully and loaded into pandas.")
+    except Exception as e:
+        raise FileNotFoundError(f"⚠️ Error loading the Excel file. Possible issues:\n"
+                                f"1. File format is incorrect (Try using .xlsx instead of .xlsm).\n"
+                                f"2. File is corrupted.\n"
+                                f"3. Pandas cannot read the file.\n"
+                                f"Error Details: {str(e)}")
+else:
+    raise FileNotFoundError(f"🚨 Error: Could not download the Excel file.\n"
+                            f"❌ Check your GitHub URL: {github_excel_url}\n"
+                            f"❌ Status Code: {response.status_code}")
 
 impact_df = pd.read_excel(xls, sheet_name="Impact")
 communication_df = pd.read_excel(xls, sheet_name="Communication")
