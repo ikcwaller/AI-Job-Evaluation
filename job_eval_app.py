@@ -1,37 +1,45 @@
-import openai
 import streamlit as st
 import pandas as pd
 import requests
-import os
 from io import BytesIO
+import os
 
-# GitHub Raw URL for Excel file (Replace 'your-username' and 'your-repo-name')
-github_excel_url = "https://raw.githubusercontent.com/ikcwaller/AI-Job-Evaluation/main/IPE_Calculator_HFG_HH.xlsx"
+# Google Gemini API setup
+GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")  # Store this in Streamlit secrets
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent"
 
-# Fetch the file from GitHub and verify it loads correctly
-response = requests.get(github_excel_url)
-
-if response.status_code == 200:
-    file_content = BytesIO(response.content)
+# Function to send request to Google Gemini API
+def query_gemini_api(prompt):
+    headers = {"Content-Type": "application/json"}
+    params = {"key": GOOGLE_GEMINI_API_KEY}
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
     
-    try:
-        xls = pd.ExcelFile(file_content)
-        print("✅ File downloaded successfully and loaded into pandas.")
-    except Exception as e:
-        raise FileNotFoundError(f"⚠️ Error loading the Excel file. Possible issues:\n"
-                                f"1. File format is incorrect (Try using .xlsx instead of .xlsm).\n"
-                                f"2. File is corrupted.\n"
-                                f"3. Pandas cannot read the file.\n"
-                                f"Error Details: {str(e)}")
-else:
-    raise FileNotFoundError(f"🚨 Error: Could not download the Excel file.\n"
-                            f"❌ Check your GitHub URL: {github_excel_url}\n"
-                            f"❌ Status Code: {response.status_code}")
+    response = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload)
+    if response.status_code == 200:
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        return f"API Error! Details: {response.text}"
 
-impact_df = pd.read_excel(xls, sheet_name="Impact")
-communication_df = pd.read_excel(xls, sheet_name="Communication")
-innovation_df = pd.read_excel(xls, sheet_name="Innovation")
-knowledge_df = pd.read_excel(xls, sheet_name="Knowledge")
+# Mapping function for IPE Score to Job Level
+def map_ipe_to_level(ipe_score):
+    mapping = {
+        range(40, 42): 1,
+        range(42, 44): 2,
+        range(44, 46): 3,
+        range(46, 48): 4,
+        range(48, 51): 5,
+        range(51, 53): 6,
+        range(53, 56): 7,
+        range(56, 58): 8,
+        range(58, 60): 9,
+        range(60, 62): 10,
+        range(62, 66): 11,
+        range(66, 74): 12,
+    }
+    for score_range, level in mapping.items():
+        if ipe_score in score_range:
+            return level
+    return "Unknown"
 
 # Streamlit Web App
 def main():
@@ -52,33 +60,49 @@ def main():
 def evaluate_job(job_desc):
     """AI-powered function to analyze job complexity and assign an IPE level."""
     
-    # Securely get API key from environment variable
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("🚨 Missing OpenAI API Key. Set the OPENAI_API_KEY environment variable.")
-    
-    client = openai.OpenAI(api_key=api_key)
-    
     prompt = f"""
-    You are an HR expert in job evaluation using the IPE methodology.
-    Analyze the following job description:
-    """
-    prompt += job_desc + """
-    Based on IPE principles (Impact, Communication, Innovation, Knowledge), provide:
-    - IPE Level recommendation (1-5)
-    - Justification based on complexity, scope, and influence
-    - Suggested Job Family & Stream (using provided Job Architecture framework)
+    You are an HR expert specializing in job evaluation using the IPE methodology and the company's Job Architecture framework.
+    Your task is to carefully analyze the job description below and determine the correct IPE level.
+    
+    **Job Description:**
+    {job_desc}
+    
+    **Assign the following values:**
+    - **IPE Total Score (40-73 scale), considering both job responsibilities and complexity. Avoid overrating.**
+    - **Mapped Job Level (1-12) using this defined structure:**
+      - 40-41 → Level 1
+      - 42-43 → Level 2
+      - 44-45 → Level 3
+      - 46-47 → Level 4
+      - 48-50 → Level 5
+      - 51-52 → Level 6
+      - 53-55 → Level 7
+      - 56-57 → Level 8
+      - 58-59 → Level 9
+      - 60-61 → Level 10
+      - 62-65 → Level 11
+      - 66-73 → Level 12
+    - **Brief Justification (1-2 sentences only), explaining why the job fits the assigned level.**
+    
+    **Return ONLY in this format:**
+    IPE Total Score: X
+    Mapped Level: Y
+    Justification: (Short and clear statement)
+    
+    Do NOT include unnecessary details, do NOT repeat the job description, and do NOT explain the process. Keep the answer concise.
     """
     
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are an AI specialized in Job Evaluation."},
-            {"role": "user", "content": prompt}
-        ]
-    )
+    response = query_gemini_api(prompt)
     
-    return response.choices[0].message.content
+    # Extract IPE score from response
+    try:
+        ipe_score = int(response.split("IPE Total Score:")[1].split("\n")[0].strip())
+        mapped_level = map_ipe_to_level(ipe_score)
+        response = response.replace(f"Mapped Level: {ipe_score}", f"Mapped Level: {mapped_level}")
+    except Exception:
+        pass  # If parsing fails, keep the original response
+    
+    return response
 
 if __name__ == "__main__":
     main()
