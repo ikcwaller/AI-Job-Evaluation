@@ -121,7 +121,7 @@ knowledge_definitions_table     = fetch_text_table("knowledge_definitions")
 ###############################
 # 4) Gemini API Query Function #
 ###############################
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent"
 def query_gemini_api(prompt):
     headers = {"Content-Type": "application/json"}
     api_key = os.getenv("GOOGLE_GEMINI_API_KEY")
