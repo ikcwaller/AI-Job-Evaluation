@@ -728,8 +728,8 @@ def main():
 
     mode = st.radio("Mode:", ["Create & Evaluate (Dynamic asymmetry)", "Evaluate Existing JD"])
 
-    if mode == "Create & Evaluate (Dynamic asymmetry)":
-        st.markdown("**Step 1: Enter Role Details** (the JD will be generated to *fit* your selected seniority using dynamic asymmetry)")
+    if mode == "Create & Evaluate":
+        st.markdown("**Step 1: Enter Role Details**")
         with st.form("role_inputs"):
             col1, col2 = st.columns(2)
             with col1:
@@ -892,3 +892,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
