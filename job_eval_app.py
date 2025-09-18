@@ -1024,7 +1024,7 @@ def main():
         st.markdown("---")
         st.markdown("**Organization Context for IPE**")
         # Size slider now capped at 13 for your org
-        sz = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 10.0, step=0.5)
+        sz = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 7.0, step=0.5)
         tm_str = st.selectbox("Team Responsibility:", [
             "1 - Individual Contributor","2 - Manager over Employees","3 - Manager over Managers"
         ])
@@ -1091,7 +1091,7 @@ def main():
         ex  = st.text_area("Paste Job Description Here:", height=320)
         br_ex = st.selectbox("Breadth of Role (IPE):", list(BREADTH_VALUE_MAP.keys()), key="br_ex")
         # Org Context inputs
-        sz_ex = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 10.0, step=0.5, key="sz_ex")
+        sz_ex = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 7.0, step=0.5, key="sz_ex")
         tm_str_ex = st.selectbox("Team Responsibility:", [
             "1 - Individual Contributor","2 - Manager over Employees","3 - Manager over Managers"
         ], key="tm_ex")
@@ -1123,3 +1123,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
