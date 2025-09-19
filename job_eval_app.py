@@ -1,7 +1,7 @@
 # job_eval_app.py — v3.4.0
-# (Unified evaluator, all-dimension guardrails, band scaffolds, iterative JD revision,
+# (One-band-up enrichment cap + optional band-floor language;
+#  Unified evaluator, all-dimension guardrails, band scaffolds, iterative JD revision,
 #  live seniority selector between Breadth and Org Context, Director=58–59 / Executive=60–73,
-#  reference-size wording check (ORG_SIZE_MAX=13) with balanced ±2 size overshoot cap,
 #  no visible cues, no commentary in JD)
 
 import streamlit as st
@@ -16,7 +16,7 @@ from typing import Dict, Tuple, Optional, List
 # Streamlit Config & Setup   #
 ###############################
 st.set_page_config(page_title="Job Description Generator & IPE Evaluator", layout="wide")
-VERSION = "v3.4.0 – Sept 2025 (ref-size check + balanced size cap)"
+VERSION = "v3.4.0 – Sept 2025 (one-band enrichment cap + band floor hints)"
 
 ###############################
 # Google Sheets Configuration#
@@ -205,36 +205,6 @@ BREADTH_VALUE_MAP = {"Domestic role": 1.0, "Regional role": 2.0, "Global role": 
 BREADTH_POINTS     = {1.0: 0, 1.5: 5, 2.0: 10, 2.5: 15, 3.0: 20}
 
 ###############################
-# Org Size & Reference Size  #
-###############################
-# Company-specific size horizon (you said your org tops out around size 13)
-ORG_SIZE_MAX = 13
-# Balanced policy: allow up to ±2 IPE points drift due to size-only uplift/downdraft
-SIZE_OVERSHOOT_CAP_LEVELS = 2
-
-def get_reference_size() -> float:
-    """
-    Pick a realistic 'reference Size' for wording-fit checks:
-    - Median Size column <= ORG_SIZE_MAX if possible, else median of all Size columns.
-    """
-    try:
-        cols = [float(c) for c in impact_size_df.columns]
-    except Exception:
-        return 7.0  # safe default
-    cols = sorted([c for c in cols if not pd.isna(c)])
-    if not cols:
-        return 7.0
-    eligible = [c for c in cols if c <= ORG_SIZE_MAX]
-    arr = eligible if eligible else cols
-    mid = len(arr) // 2
-    if len(arr) % 2 == 1:
-        return float(arr[mid])
-    # choose the lower median to be conservative
-    return float(arr[mid - 1])
-
-REF_SIZE = get_reference_size()
-
-###############################
 # Seniority options & bands  #
 ###############################
 # Seven banded options with live-updating description (selectbox). Bands corrected (Director 58–59, Executive 60–73).
@@ -244,13 +214,13 @@ SENIORITY_OPTIONS: List[Tuple[str, str, Tuple[int,int]]] = [
      (41, 47)),
     ("Professional",
      "Manager: none. IC: operates independently on well-defined work, collaborates across the team, may coach juniors informally.",
-     (48, 52)),
+     (48, 50)),
     ("Team Supervisor / Senior Professional",
      "Manager: first-line lead for a small team or shift; owns day-to-day scheduling and quality. IC: recognized specialist delivering complex work within one function.",
-     (51, 55)),
+     (51, 52)),
     ("Manager / Expert",
      "Manager: manages a team or discrete function with clear objectives and budget influence. IC: senior specialist who sets methods/standards for a work area and drives cross-functional delivery.",
-     (53, 57)),
+     (53, 55)),
     ("Senior Manager / Senior Expert",
      "Manager: leads multiple teams/programs; shapes mid-term plans across a function. IC: organization-wide expert with deep subject authority and broad influence.",
      (56, 57)),
@@ -262,6 +232,27 @@ SENIORITY_OPTIONS: List[Tuple[str, str, Tuple[int,int]]] = [
      (60, 73)),
 ]
 SENIORITY_IPE_MAP: Dict[str, Tuple[int,int]] = {label: band for (label, _desc, band) in SENIORITY_OPTIONS}
+
+# Band order helpers for the one-band-up cap
+BAND_ORDER = [opt[0] for opt in SENIORITY_OPTIONS]
+BAND_INDEX = {label: i for i, label in enumerate(BAND_ORDER)}
+
+def band_index_for_score(score: Optional[int]) -> Optional[int]:
+    """Return index in BAND_ORDER for a computed IPE score, or nearest band if between."""
+    if not isinstance(score, int):
+        return None
+    # Direct band match
+    for (label, _desc, (lo, hi)) in SENIORITY_OPTIONS:
+        if lo <= score <= hi:
+            return BAND_INDEX[label]
+    # Nearest by midpoint if between bands
+    best_idx, best_gap = None, 1e9
+    for i, (_lbl, _desc, (lo, hi)) in enumerate(SENIORITY_OPTIONS):
+        mid = (lo + hi) / 2
+        gap = abs(score - mid)
+        if gap < best_gap:
+            best_idx, best_gap = i, gap
+    return best_idx
 
 ###############################
 # Prompt Builders             #
@@ -362,17 +353,28 @@ BAND_SCAFFOLDS: Dict[str, str] = {
         "Horizon: 3–5+ years. Influence: corporate/group level."
 }
 
+# Optional band "floor language": a tiny hint we can inject when allowed to enrich by one band.
+BAND_MIN_LANGUAGE: Dict[str, str] = {
+    "Professional": "Owns defined deliverables; proposes improvements within established methods; collaborates across the team.",
+    "Team Supervisor / Senior Professional": "Leads day-to-day work; resolves issues; negotiates within set parameters.",
+    "Manager / Expert": "Sets methods/standards for a work area; drives cross-functional delivery; accountable for a program or team outcomes.",
+    "Senior Manager / Senior Expert": "Leads multi-team programs; shapes mid-term plans; architect-level expertise.",
+    "Director / Renowned Expert": "Sets functional/division strategy aligned to corporate; allocates resources; defines standards/policy.",
+    "Executive": "Sets enterprise/BU strategy; owns P&L; governs enterprise policy."
+}
+
 def build_generation_prompt_constrained(
     title, purpose, breadth_str, report, people, fin, decision,
     stake, delivs, background, locked_ratings: Dict[str, float],
-    min_ipe: int, max_ipe: int, band_label: str
+    min_ipe: int, max_ipe: int, band_label: str, enrich_floor_text: str = ""
 ) -> str:
     ds = "\n".join(f"- {d.strip()}" for d in delivs.splitlines() if d.strip())
     scaffold = BAND_SCAFFOLDS.get(band_label, "")
+    floor_hint = f" • BAND MIN-FLOOR HINTS: {enrich_floor_text}" if enrich_floor_text else ""
     return f"""
 You are an HR expert. Write a job description strictly consistent with the locked IPE ratings and target band.
 
-TARGET IPE BAND: {min_ipe}–{max_ipe}  •  BAND LEXICON HINTS: {scaffold}
+TARGET IPE BAND: {min_ipe}–{max_ipe}  •  BAND LEXICON HINTS: {scaffold}{floor_hint}
 
 LOCKED RATINGS (reflect in scope/wording; do not exceed):
 - Impact: {int(locked_ratings['impact'])} (integer)
@@ -711,6 +713,9 @@ each as {{ "value": X, "justification": "..." }}.
 def total_delta(initial: Dict[str, float], current: Dict[str, float]) -> float:
     return sum(abs(current[k] - initial[k]) for k in initial.keys())
 
+def _within_dynamic(score, min_ipe, max_ipe, lower_tol, upper_tol):
+    return (score != "") and (min_ipe - lower_tol) <= score <= (max_ipe + upper_tol)
+
 def auto_fit_to_band_dynamic(
     vals: Dict[str, float], size: float, teams: float, breadth_str: str,
     min_ipe: int, max_ipe: int, base_score: Optional[int] = None, max_iters: int = 60
@@ -739,7 +744,7 @@ def auto_fit_to_band_dynamic(
     notes["lower_tol"], notes["upper_tol"] = lower_tol, upper_tol
 
     def within(score) -> bool:
-        return (score != "") and (min_ipe - lower_tol) <= score <= (max_ipe + upper_tol)
+        return _within_dynamic(score, min_ipe, max_ipe, lower_tol, upper_tol)
 
     info = compute_points_and_ipe(current, size, teams, breadth_str)
     if within(info["ipe_score"]):
@@ -862,7 +867,7 @@ def evaluate_job_from_jd(job_desc: str, size: float, teams: float, breadth_str: 
     return score, details, raw_vals
 
 ###############################
-# JD Revision Loop + RefSize  #
+# JD Revision Loop            #
 ###############################
 def build_revision_prompt(current_jd: str, direction: str, band_label: str,
                           hard_bounds: Tuple[int,int], breadth_str: str) -> str:
@@ -889,9 +894,6 @@ Return ONLY the revised JD content (no fences, no commentary). Keep the same sec
 {current_jd}
 """
 
-def within_band_window(score: Optional[int], min_ipe: int, max_ipe: int, window: int = 1) -> bool:
-    return (score != "") and (min_ipe - window) <= score <= (max_ipe + window)
-
 def iterative_generate_and_lock(
     title, purpose, breadth_str, report, people, fin, decision,
     stake, delivs, background, seniority_label,
@@ -906,59 +908,56 @@ def iterative_generate_and_lock(
     # Apply guardrails on the prompt-based interpretation too
     vals0, guard_notes0 = apply_all_guardrails(vals0, title, purpose + "\n" + delivs + "\n" + decision, teams, vals0.get("frame",3), breadth_str)
 
-    # 2) Auto-fit numeric ratings to band (dynamic asymmetry)
+    # 2) Band window + one-band-up enrichment cap based on *inputs* baseline
     min_ipe, max_ipe = SENIORITY_IPE_MAP[seniority_label]
-    base_score = compute_points_and_ipe(vals0, REF_SIZE, teams, breadth_str)["ipe_score"]  # base at REF_SIZE
-    fitted_vals, fit_notes = auto_fit_to_band_dynamic(vals0, REF_SIZE, teams, breadth_str, min_ipe, max_ipe, base_score=base_score)
+    base_info  = compute_points_and_ipe(vals0, size, teams, breadth_str)
+    base_score = base_info["ipe_score"]
 
-    # 3) Generate JD strictly under locked ratings + band scaffolds
+    underspecified = isinstance(base_score, int) and base_score < (min_ipe - 1)
+
+    # One-band-up cap: if inputs sit in band X, allow enrichment only up to band X+1.
+    allow_enrichment = False
+    if underspecified:
+        base_band_idx   = band_index_for_score(base_score)
+        target_band_idx = BAND_INDEX[seniority_label]
+        if base_band_idx is not None and target_band_idx <= base_band_idx + 1:
+            allow_enrichment = True
+
+    # If it's more than one band below, fail fast (don’t over-lift wording)
+    if underspecified and not allow_enrichment:
+        raise RuntimeError(
+            "The role inputs evaluate more than one band below the selected Estimated Seniority. "
+            "For quality control, the assistant won’t lift wording by more than one band. "
+            "Please either strengthen the role inputs (scope, decision frame, negotiation posture, complexity) "
+            "or choose a lower Estimated Seniority and try again."
+        )
+
+    # 3) Auto-fit numeric ratings to band (dynamic asymmetry)
+    fitted_vals, fit_notes = auto_fit_to_band_dynamic(vals0, size, teams, breadth_str, min_ipe, max_ipe, base_score=base_score)
+
+    # 4) Generate JD strictly under locked ratings + band scaffolds (+ optional band floor language if allowed)
+    enrich_text = BAND_MIN_LANGUAGE.get(seniority_label, "") if allow_enrichment else ""
     prompt = build_generation_prompt_constrained(
         title, purpose, breadth_str, report, people, fin, decision, stake, delivs, background,
-        locked_ratings=fitted_vals, min_ipe=min_ipe, max_ipe=max_ipe, band_label=seniority_label
+        locked_ratings=fitted_vals, min_ipe=min_ipe, max_ipe=max_ipe, band_label=seniority_label,
+        enrich_floor_text=enrich_text
     )
     draft = sanitize_jd_output(query_gemini_text(prompt, temperature=gen_temp))
 
-    # 4) Evaluate generated JD at REFERENCE SIZE (wording-fit check)
-    score_ref, details_ref, inferred_vals_ref = evaluate_job_from_jd(draft, REF_SIZE, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
+    # 5) Evaluate generated JD (same pipeline used in Evaluate Only)
+    score, details, inferred_vals = evaluate_job_from_jd(draft, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
 
-    # 5) If outside band±1 at REF_SIZE, minimally revise iteratively at REF_SIZE
-    rev_count = 0
-    while not within_band_window(score_ref, min_ipe, max_ipe, window=1) and rev_count < max_revisions:
-        direction = "nudge_down" if isinstance(score_ref, int) and score_ref > (max_ipe + 1) else "nudge_up"
-        rev_prompt = build_revision_prompt(draft, direction, seniority_label, (min_ipe, max_ipe), breadth_str)
-        revised = sanitize_jd_output(query_gemini_text(rev_prompt, temperature=gen_temp))
-        draft = revised
-        score_ref, details_ref, inferred_vals_ref = evaluate_job_from_jd(draft, REF_SIZE, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
-        rev_count += 1
+    # Dynamic asymmetry window
+    lower_tol, upper_tol = 1, 1
+    if isinstance(score, int):
+        if score > (max_ipe + 1):
+            lower_tol, upper_tol = 1, 0
+        elif score < (min_ipe - 1):
+            lower_tol, upper_tol = 0, 1
 
-    if not within_band_window(score_ref, min_ipe, max_ipe, window=1):
-        raise RuntimeError(
-            f"Could not align wording to the selected band {min_ipe}–{max_ipe} at reference Size {REF_SIZE}. "
-            "Your inputs likely describe a scope too senior/junior for the chosen band. "
-            "Try a different Estimated Seniority or adjust the inputs."
-        )
+    def within_window(s: Optional[int]) -> bool:
+        return (s != "" and (min_ipe - lower_tol) <= s <= (max_ipe + upper_tol))
 
-    # 6) With wording aligned at REF_SIZE, now compute ACTUAL SIZE result
-    score_actual, details_actual, inferred_vals_actual = evaluate_job_from_jd(draft, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
-
-    # 7) Enforce balanced size-only overshoot cap (±2)
-    upper_allowed = max_ipe + SIZE_OVERSHOOT_CAP_LEVELS
-    lower_allowed = min_ipe - SIZE_OVERSHOOT_CAP_LEVELS
-    if isinstance(score_actual, int):
-        if score_actual > upper_allowed:
-            raise RuntimeError(
-                f"At your selected Size {size}, this JD evaluates to IPE {score_actual}, which exceeds the allowed "
-                f"+{SIZE_OVERSHOOT_CAP_LEVELS} uplift beyond the selected band ({min_ipe}–{max_ipe}). "
-                "Please pick a higher Estimated Seniority or reduce Size / scope."
-            )
-        if score_actual < lower_allowed:
-            raise RuntimeError(
-                f"At your selected Size {size}, this JD evaluates to IPE {score_actual}, which is more than "
-                f"-{SIZE_OVERSHOOT_CAP_LEVELS} below the selected band ({min_ipe}–{max_ipe}). "
-                "Please pick a lower Estimated Seniority or increase Size / scope."
-            )
-
-    # 8) Banners (informational)
     banners = []
     if guard_notes0:
         banners.extend(guard_notes0)
@@ -969,12 +968,20 @@ def iterative_generate_and_lock(
     if fit_notes["cap_hits"] or fit_notes["cap_total_reached"]:
         hit_list = ", ".join(fit_notes["cap_hits"]) if fit_notes["cap_hits"] else "rating changes"
         banners.append(f"Small adjustment caps were reached ({hit_list}).")
-    # Note any size-driven difference
-    if isinstance(score_actual, int) and isinstance(score_ref, int) and score_actual != score_ref:
-        delta = score_actual - score_ref
-        banners.append(f"Size-driven delta vs reference (Size {REF_SIZE}): {delta:+d} IPE.")
+    if allow_enrichment:
+        banners.append("Adapted wording upward by one band to meet the selected Estimated Seniority; please review scope carefully.")
 
-    return draft, score_actual, details_actual, inferred_vals_actual, banners, (min_ipe, max_ipe), score_ref, REF_SIZE
+    # 6) If outside window, minimally revise iteratively
+    rev_count = 0
+    while not within_window(score) and rev_count < max_revisions:
+        direction = "nudge_down" if isinstance(score, int) and score > max_ipe else "nudge_up"
+        rev_prompt = build_revision_prompt(draft, direction, seniority_label, (min_ipe, max_ipe), breadth_str)
+        revised = sanitize_jd_output(query_gemini_text(rev_prompt, temperature=gen_temp))
+        draft = revised
+        score, details, inferred_vals = evaluate_job_from_jd(draft, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
+        rev_count += 1
+
+    return draft, score, details, banners, (min_ipe, max_ipe)
 
 ###############################
 # Main Streamlit UI          #
@@ -987,7 +994,6 @@ def main():
         gen_temp = st.slider("JD Generation temperature", 0.0, 1.0, 0.2, 0.1)
         eval_temp = st.slider("Evaluation temperature", 0.0, 1.0, 0.0, 0.1)
         st.text("Model (env var GEMINI_MODEL): " + os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
-        st.caption(f"Reference Size for wording-fit checks: {REF_SIZE}  •  Size overshoot cap: ±{SIZE_OVERSHOOT_CAP_LEVELS} IPE")
 
     mode = st.radio("Mode:", ["Create & Evaluate", "Evaluate Existing JD"])
 
@@ -1023,8 +1029,7 @@ def main():
 
         st.markdown("---")
         st.markdown("**Organization Context for IPE**")
-        # Size slider now capped at 13 for your org
-        sz = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 7.0, step=0.5)
+        sz = st.slider("Size Score (1–13)", 1.0, 13.0, 7.0, step=0.5)
         tm_str = st.selectbox("Team Responsibility:", [
             "1 - Individual Contributor","2 - Manager over Employees","3 - Manager over Managers"
         ])
@@ -1050,16 +1055,15 @@ def main():
                 st.error(f"Please fill in: {', '.join(missing)}")
             else:
                 try:
-                    with st.spinner("Creating and aligning the JD with IPE band (incl. reference-size check)..."):
-                        (jd_text, score_actual, details_actual, raw_vals_actual,
-                         banners, (min_ipe, max_ipe), score_ref, ref_size) = iterative_generate_and_lock(
+                    with st.spinner("Creating and aligning the JD with IPE band..."):
+                        jd_text, final_score, calc_details, banners, (min_ipe, max_ipe) = iterative_generate_and_lock(
                             jt, pu, br, rp, pr, fr, de, stak, td, bg, sr_selected,
                             sz, tm, gen_temp, eval_temp, max_revisions=4
                         )
                         st.session_state.jd = jd_text
                         st.session_state.jd_signature = make_signature()
                 except Exception as e:
-                    st.error(str(e))
+                    st.error(f"Failed to generate/evaluate JD: {e}")
                     st.stop()
 
                 st.subheader("🔧 Generated Job Description")
@@ -1068,17 +1072,15 @@ def main():
 
                 st.markdown("---")
                 st.subheader(f"🏆 IPE Evaluation Result (Target band {min_ipe}–{max_ipe})")
-                # Show the actual-size details (raw ratings + numeric lookup)
-                st.markdown(details_actual.split("### Final Calculation")[0])
+                st.markdown(calc_details.split("### Final Calculation")[0])  # Raw ratings + numeric lookup
                 st.markdown("### Final Calculation")
-                # Compute final totals again from already-parsed raw ratings (no extra LLM call)
-                info_again = compute_points_and_ipe(raw_vals_actual, sz, tm, br)
-                job_level_actual = map_job_level(score_actual)
+                # Re-evaluate once more to print clean summary
+                score, details, _ = evaluate_job_from_jd(st.session_state.jd, sz, tm, br, eval_temperature=eval_temp, title_hint=jt)
+                job_level = map_job_level(score)
+                info_again = compute_points_and_ipe(rate_dimensions_from_jd_text(st.session_state.jd, eval_temp)[0], sz, tm, br)
                 st.markdown(f"- Total Points: {info_again['total_pts']:.1f}")
-                st.markdown(f"- IPE Score: **{score_actual}**")
-                st.markdown(f"- Job Level: **{job_level_actual}**")
-                # Add a small caption about the reference-size check for transparency
-                st.caption(f"Reference-size check (Size {ref_size}): IPE {score_ref}, Level {map_job_level(score_ref)}.")
+                st.markdown(f"- IPE Score: **{score}**")
+                st.markdown(f"- Job Level: **{job_level}**")
                 if banners:
                     st.info(" ".join(banners))
 
@@ -1090,8 +1092,8 @@ def main():
         st.header("🔍 Evaluate an Existing Job Description")
         ex  = st.text_area("Paste Job Description Here:", height=320)
         br_ex = st.selectbox("Breadth of Role (IPE):", list(BREADTH_VALUE_MAP.keys()), key="br_ex")
-        # Org Context inputs
-        sz_ex = st.slider("Size Score (1–13)", 1.0, float(ORG_SIZE_MAX), 7.0, step=0.5, key="sz_ex")
+        # Seniority is not required for evaluate-only, but we keep Org Context inputs consistent:
+        sz_ex = st.slider("Size Score (1–13)", 1.0, 13.0, 7.0, step=0.5, key="sz_ex")
         tm_str_ex = st.selectbox("Team Responsibility:", [
             "1 - Individual Contributor","2 - Manager over Employees","3 - Manager over Managers"
         ], key="tm_ex")
@@ -1103,24 +1105,19 @@ def main():
             else:
                 try:
                     with st.spinner("Evaluating IPE level..."):
-                        # Evaluate at reference size for wording-fit transparency
-                        score_ref, details_ref, _ = evaluate_job_from_jd(ex, REF_SIZE, tm_ex, br_ex, eval_temperature=0.0)
-                        # Evaluate at actual size for final
-                        score_act, details_act, _ = evaluate_job_from_jd(ex, sz_ex, tm_ex, br_ex, eval_temperature=0.0)
+                        score, details, _ = evaluate_job_from_jd(ex, sz_ex, tm_ex, br_ex, eval_temperature=eval_temp)
                 except Exception as e:
                     st.error(f"Could not evaluate JD: {e}")
                     st.stop()
-                if score_act == "":
+                if score == "":
                     st.error("Could not compute a valid IPE score (see diagnostics below).")
-                    st.markdown(details_act)
+                    st.markdown(details)
                 else:
-                    st.subheader(f"🏆 IPE Evaluation Result (Actual Size {sz_ex})")
-                    st.markdown(details_act)
-                    st.caption(f"Reference-size check (Size {REF_SIZE}): IPE {score_ref}, Level {map_job_level(score_ref)}")
+                    st.subheader(f"🏆 IPE Evaluation Result (Score: {score}, Level {map_job_level(score)})")
+                    st.markdown(details)
 
     st.caption("Internal use only. Ensure appropriate rights to use Mercer IPE materials.")
     st.caption(VERSION)
 
 if __name__ == "__main__":
     main()
-
