@@ -1,8 +1,17 @@
-# job_eval_app.py — v3.4.0
-# (One-band-up enrichment cap + optional band-floor language;
-#  Unified evaluator, all-dimension guardrails, band scaffolds, iterative JD revision,
-#  live seniority selector between Breadth and Org Context, Director=58–59 / Executive=60–73,
-#  no visible cues, no commentary in JD)
+# job_eval_app.py — v3.5.3
+# (Smart dual output + cleaner JD text + title-stable evaluation + stronger strict-in-band loop)
+#
+# v3.5.3:
+#   - Strict-in-band default revisions raised to 12
+#   - Every 3rd strict revision is a stronger "tighten" pass to scrub executive cues
+# v3.5.2:
+#   - Evaluate-only: optional Job Title input (prefilled from last title)
+#   - evaluate_job_from_jd: footer title extraction if title_hint missing
+# v3.5.1:
+#   - Smart Option B: generate input-driven JD first; if it's in band, skip strict version
+#   - Sanitizer strips change logs / rationale / notes from JD
+# v3.5.0:
+#   - Dual-output mode (strict-in-band + input-driven)
 
 import streamlit as st
 import pandas as pd
@@ -16,7 +25,7 @@ from typing import Dict, Tuple, Optional, List
 # Streamlit Config & Setup   #
 ###############################
 st.set_page_config(page_title="Job Description Generator & IPE Evaluator", layout="wide")
-VERSION = "v3.4.0 – Sept 2025 (one-band enrichment cap + band floor hints)"
+VERSION = "v3.5.3 – Oct 2025 (stronger strict-in-band editor + title-stable evaluation)"
 
 ###############################
 # Google Sheets Configuration#
@@ -207,7 +216,6 @@ BREADTH_POINTS     = {1.0: 0, 1.5: 5, 2.0: 10, 2.5: 15, 3.0: 20}
 ###############################
 # Seniority options & bands  #
 ###############################
-# Seven banded options with live-updating description (selectbox). Bands corrected (Director 58–59, Executive 60–73).
 SENIORITY_OPTIONS: List[Tuple[str, str, Tuple[int,int]]] = [
     ("Entry / Early Career",
      "Manager: none. IC: learning core tasks, works to defined procedures, close supervision; impact mainly within own team.",
@@ -241,11 +249,9 @@ def band_index_for_score(score: Optional[int]) -> Optional[int]:
     """Return index in BAND_ORDER for a computed IPE score, or nearest band if between."""
     if not isinstance(score, int):
         return None
-    # Direct band match
     for (label, _desc, (lo, hi)) in SENIORITY_OPTIONS:
         if lo <= score <= hi:
             return BAND_INDEX[label]
-    # Nearest by midpoint if between bands
     best_idx, best_gap = None, 1e9
     for i, (_lbl, _desc, (lo, hi)) in enumerate(SENIORITY_OPTIONS):
         mid = (lo + hi) / 2
@@ -328,7 +334,7 @@ def breadth_to_geo_phrase(breadth_str: str) -> str:
         "Global role":   "Global/enterprise scope"
     }.get(breadth_str, breadth_str)
 
-# Band scaffolds: compact lexicon/scope hints used when writing/revising JDs.
+# Band scaffolds
 BAND_SCAFFOLDS: Dict[str, str] = {
     "Entry / Early Career":
         "Verbs: assist, process, follow, coordinate. Decision frame: within team; escalate exceptions. "
@@ -353,7 +359,7 @@ BAND_SCAFFOLDS: Dict[str, str] = {
         "Horizon: 3–5+ years. Influence: corporate/group level."
 }
 
-# Optional band "floor language": a tiny hint we can inject when allowed to enrich by one band.
+# Optional band "floor language"
 BAND_MIN_LANGUAGE: Dict[str, str] = {
     "Professional": "Owns defined deliverables; proposes improvements within established methods; collaborates across the team.",
     "Team Supervisor / Senior Professional": "Leads day-to-day work; resolves issues; negotiates within set parameters.",
@@ -389,6 +395,7 @@ Guardrails (must respect):
 - Do not claim enterprise/division strategy setting, org-wide policy ownership, or P&L unless explicitly stated in inputs.
 - Keep scope realistic for People/Financial responsibility and Breadth = {breadth_to_geo_phrase(breadth_str)}.
 - Prefer factual, non-glossy language; no marketing hype.
+- Do **NOT** include change logs, rationales, or editor notes in the output.
 
 Return ONLY the JD content in this structure (no code fences, no commentary before/after):
 
@@ -806,33 +813,62 @@ def auto_fit_to_band_dynamic(
 ###############################
 # Evaluate from JD (Standalone)
 ###############################
+# Sanitizer: strip prefaces and any "Key Changes / Rationale / Notes" blocks
+_SAN_H1_PAT = re.compile(r"^\s*[-*_]*\s*objectives\s*[-*_]*\s*$", re.I)
+_SAN_STOP_PAT = re.compile(r"^\s*(key\s*changes|changes\s*made|rationale|editor\s*notes?|notes?)\s*[:\-–]?\s*$", re.I)
+# Footer title extraction (if present)
+_TITLE_FOOTER_RE = re.compile(r"(?im)^\s*•?\s*Job\s*Title\s*:\s*(.+?)\s*$")
+
 def sanitize_jd_output(text: str) -> str:
-    """Strip code fences/commentary; keep content between the first and last '---' if present."""
+    """
+    Strip code fences/explanations. Prefer content between '---' markers.
+    Otherwise start at 'Objectives' and stop before 'Key Changes/Rationale/Notes'.
+    """
     t = text.strip()
     if t.startswith("```"):
         t = t.strip("`").strip()
-    # Extract between --- markers
+
     lines = t.splitlines()
+
+    # Case 1: keep strictly between the first and last '---'
     if sum(1 for L in lines if L.strip() == "---") >= 2:
-        first = next(i for i,L in enumerate(lines) if L.strip()=="---")
-        last  = len(lines) - 1 - next(i for i,L in enumerate(reversed(lines)) if L.strip()=="---")
+        first = next(i for i, L in enumerate(lines) if L.strip() == "---")
+        last  = len(lines) - 1 - next(i for i, L in enumerate(reversed(lines)) if L.strip() == "---")
         content = "\n".join(lines[first+1:last]).strip()
-        if content:
-            return content
-    # Else try from "Objectives"
-    idx = None
-    for i,L in enumerate(lines):
-        if L.strip().lower().startswith("objectives"):
-            idx = i; break
-    if idx is not None:
-        return "\n".join(lines[idx:]).strip()
+        return content if content else t
+
+    # Case 2: find "Objectives" as the start anchor
+    start = None
+    for i, L in enumerate(lines):
+        if _SAN_H1_PAT.match(L.strip()) or L.strip().lower().startswith("objectives"):
+            start = i
+            break
+    if start is not None:
+        # find first stop heading (Key Changes / Rationale / Notes)
+        stop = None
+        for j in range(start+1, len(lines)):
+            if _SAN_STOP_PAT.match(lines[j].strip()):
+                stop = j
+                break
+        keep = lines[start: (stop if stop is not None else len(lines))]
+        return "\n".join(keep).strip()
+
+    # Fallback: if a stop heading exists anywhere, drop everything after it
+    for j, L in enumerate(lines):
+        if _SAN_STOP_PAT.match(L.strip()):
+            return "\n".join(lines[:j]).strip()
+
     return t
 
 def evaluate_job_from_jd(job_desc: str, size: float, teams: float, breadth_str: str,
                          eval_temperature: float=0.0, title_hint: str = ""):
-    # No embedded cues anymore; always infer, then apply guardrails.
+    # If no title provided, try extracting from JD (if the user pasted footer)
+    if not title_hint:
+        m = _TITLE_FOOTER_RE.search(job_desc)
+        if m:
+            title_hint = m.group(1).strip()
+
     raw_vals, justs = rate_dimensions_from_jd_text(job_desc, eval_temperature=eval_temperature)
-    # Apply guardrails
     raw_vals, notes = apply_all_guardrails(raw_vals, title_hint, job_desc, teams, raw_vals.get("frame", 3), breadth_str)
     info = compute_points_and_ipe(raw_vals, size, teams, breadth_str)
     score = info["ipe_score"]
@@ -887,6 +923,7 @@ Strict rules:
 - Do not invent or imply enterprise/division strategy setting, org-wide policy ownership, or P&L if not already stated.
 - Keep scope factual and consistent with assigned breadth. No hype language.
 - Make the fewest changes necessary; keep structure identical.
+- Do **NOT** include change logs, rationales, or editor notes in the output.
 
 Return ONLY the revised JD content (no fences, no commentary). Keep the same sections.
 
@@ -900,22 +937,18 @@ def iterative_generate_and_lock(
     size, teams, gen_temp: float, eval_temp: float,
     max_revisions: int = 4
 ):
-    # 1) Initial model ratings from prompts (not JD text)
     vals0, _ = rate_dimensions_from_prompts(
         title, purpose, breadth_str, report, people, fin, decision, stake, delivs, background, seniority_label,
         eval_temperature=eval_temp
     )
-    # Apply guardrails on the prompt-based interpretation too
     vals0, guard_notes0 = apply_all_guardrails(vals0, title, purpose + "\n" + delivs + "\n" + decision, teams, vals0.get("frame",3), breadth_str)
 
-    # 2) Band window + one-band-up enrichment cap based on *inputs* baseline
     min_ipe, max_ipe = SENIORITY_IPE_MAP[seniority_label]
     base_info  = compute_points_and_ipe(vals0, size, teams, breadth_str)
     base_score = base_info["ipe_score"]
 
     underspecified = isinstance(base_score, int) and base_score < (min_ipe - 1)
 
-    # One-band-up cap: if inputs sit in band X, allow enrichment only up to band X+1.
     allow_enrichment = False
     if underspecified:
         base_band_idx   = band_index_for_score(base_score)
@@ -923,7 +956,6 @@ def iterative_generate_and_lock(
         if base_band_idx is not None and target_band_idx <= base_band_idx + 1:
             allow_enrichment = True
 
-    # If it's more than one band below, fail fast (don’t over-lift wording)
     if underspecified and not allow_enrichment:
         raise RuntimeError(
             "The role inputs evaluate more than one band below the selected Estimated Seniority. "
@@ -932,10 +964,8 @@ def iterative_generate_and_lock(
             "or choose a lower Estimated Seniority and try again."
         )
 
-    # 3) Auto-fit numeric ratings to band (dynamic asymmetry)
     fitted_vals, fit_notes = auto_fit_to_band_dynamic(vals0, size, teams, breadth_str, min_ipe, max_ipe, base_score=base_score)
 
-    # 4) Generate JD strictly under locked ratings + band scaffolds (+ optional band floor language if allowed)
     enrich_text = BAND_MIN_LANGUAGE.get(seniority_label, "") if allow_enrichment else ""
     prompt = build_generation_prompt_constrained(
         title, purpose, breadth_str, report, people, fin, decision, stake, delivs, background,
@@ -944,10 +974,8 @@ def iterative_generate_and_lock(
     )
     draft = sanitize_jd_output(query_gemini_text(prompt, temperature=gen_temp))
 
-    # 5) Evaluate generated JD (same pipeline used in Evaluate Only)
     score, details, inferred_vals = evaluate_job_from_jd(draft, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
 
-    # Dynamic asymmetry window
     lower_tol, upper_tol = 1, 1
     if isinstance(score, int):
         if score > (max_ipe + 1):
@@ -971,7 +999,6 @@ def iterative_generate_and_lock(
     if allow_enrichment:
         banners.append("Adapted wording upward by one band to meet the selected Estimated Seniority; please review scope carefully.")
 
-    # 6) If outside window, minimally revise iteratively
     rev_count = 0
     while not within_window(score) and rev_count < max_revisions:
         direction = "nudge_down" if isinstance(score, int) and score > max_ipe else "nudge_up"
@@ -983,9 +1010,90 @@ def iterative_generate_and_lock(
 
     return draft, score, details, banners, (min_ipe, max_ipe)
 
+# Strict-in-band variant with stronger loop
+def iterative_generate_strict_in_band(
+    title, purpose, breadth_str, report, people, fin, decision,
+    stake, delivs, background, seniority_label,
+    size, teams, gen_temp: float, eval_temp: float,
+    max_revisions: int = 12
+):
+    """
+    Produce a JD that lands strictly INSIDE the selected band [min_ipe, max_ipe].
+    Now tries up to 12 passes, and every 3rd pass uses a stronger tightening prompt
+    that explicitly removes executive cues (policy ownership, enterprise/division strategy, P&L, etc.).
+    """
+    draft, score, details, banners, (min_ipe, max_ipe) = iterative_generate_and_lock(
+        title, purpose, breadth_str, report, people, fin, decision, stake, delivs, background, seniority_label,
+        size, teams, gen_temp, eval_temp, max_revisions=0
+    )
+
+    def within_strict(s: Optional[int]) -> bool:
+        return (s != "" and min_ipe <= s <= max_ipe)
+
+    if within_strict(score):
+        return draft, score, details, banners, (min_ipe, max_ipe)
+
+    rev_count = 0
+    while not within_strict(score) and rev_count < max_revisions:
+        direction = "nudge_down" if isinstance(score, int) and score > max_ipe else "nudge_up"
+
+        if (rev_count + 1) % 3 == 0:
+            # Stronger tighten pass to scrub exec cues that inflate Impact/Knowledge
+            strict_prompt = f"""
+You are an HR expert editor.
+Revise the JD so it evaluates strictly within IPE {min_ipe}–{max_ipe}.
+Remove or soften statements implying enterprise or division strategy setting, org-wide policy/standards ownership,
+multi-year portfolio governance, corporate-level direction, or P&L ownership. Prefer verbs like "support",
+"execute", "within parameters", "recommend", "contribute". Keep facts accurate; no hype.
+
+Return ONLY the JD content (no fences, no commentary). Keep the same sections.
+
+--- CURRENT JD ---
+{draft}
+"""
+        else:
+            # Normal nudge pass
+            strict_prompt = f"""
+You are an HR expert editor.
+Revise the JD so that, when evaluated against Mercer IPE definitions, it lands strictly within IPE {min_ipe}–{max_ipe}.
+Keep structure and facts; do not invent enterprise/division strategy, org-wide policy, or P&L.
+Do **NOT** include change logs, rationales, or editor notes in the output.
+
+Return ONLY the revised JD content (no fences, no commentary). Keep the same sections.
+
+--- CURRENT JD ---
+{draft}
+"""
+
+        revised = sanitize_jd_output(query_gemini_text(strict_prompt, temperature=gen_temp))
+        draft = revised
+        score, details, _ = evaluate_job_from_jd(draft, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
+        rev_count += 1
+
+    # Final tightening if still outside
+    if not within_strict(score):
+        tighten_prompt = f"""
+You are an HR expert editor.
+Tighten the JD wording to remove or narrow claims that push scope beyond the target band.
+The JD MUST evaluate strictly within IPE {min_ipe}–{max_ipe}. Do not alter section structure.
+Do **NOT** include change logs, rationales, or editor notes in the output.
+
+--- CURRENT JD ---
+{draft}
+"""
+        draft2 = sanitize_jd_output(query_gemini_text(tighten_prompt, temperature=gen_temp))
+        score2, details2, _ = evaluate_job_from_jd(draft2, size, teams, breadth_str, eval_temperature=eval_temp, title_hint=title)
+        if score2 != "" and min_ipe <= score2 <= max_ipe:
+            draft, score, details = draft2, score2, details2
+
+    return draft, score, details, banners, (min_ipe, max_ipe)
+
 ###############################
 # Main Streamlit UI          #
 ###############################
+def _within_strict_band(score: Optional[int], lo: int, hi: int) -> bool:
+    return isinstance(score, int) and lo <= score <= hi
+
 def main():
     st.title("📋 Job Description Generator & IPE Evaluator")
     st.caption(VERSION)
@@ -999,10 +1107,11 @@ def main():
 
     if mode == "Create & Evaluate":
         st.markdown("**Step 1: Enter Role Details**")
-        # (No form wrapper; live inputs)
         col1, col2 = st.columns(2)
         with col1:
             jt = st.text_input("Job Title:")
+            # Keep last title available across tabs to stabilize evaluate-only later
+            st.session_state["last_title"] = jt
             pr = st.text_input("People Responsibility:")
             fr = st.text_area("Financial Responsibility (budget/P&L):")
             de = st.text_area("Decision-Making Authority:")
@@ -1014,7 +1123,6 @@ def main():
             bg = st.text_area("Required Background / Qualifications:")
             br = st.selectbox("Breadth of Role (IPE):", list(BREADTH_VALUE_MAP.keys()))
 
-        # Live Seniority selector (outside any form so description updates immediately), placed after Breadth
         st.markdown("**Estimated Seniority Level**")
         sr_labels = [opt[0] for opt in SENIORITY_OPTIONS]
         default_idx = 1 if "sr_index" not in st.session_state else st.session_state["sr_index"]
@@ -1023,7 +1131,6 @@ def main():
             sr_labels, index=default_idx, key="sr_selectbox"
         )
         st.session_state["sr_index"] = sr_labels.index(sr_selected)
-        # Show live description
         sr_desc = SENIORITY_OPTIONS[st.session_state["sr_index"]][1]
         st.caption(sr_desc)
 
@@ -1035,11 +1142,12 @@ def main():
         ])
         tm = float(tm_str[0])
 
-        # Generate / Evaluate button
         go = st.button("Generate / Regenerate")
 
-        if "jd" not in st.session_state:
-            st.session_state.jd = ""
+        if "jd_strict" not in st.session_state:
+            st.session_state.jd_strict = ""
+        if "jd_input" not in st.session_state:
+            st.session_state.jd_input = ""
         if "jd_signature" not in st.session_state:
             st.session_state.jd_signature = None
 
@@ -1055,44 +1163,108 @@ def main():
                 st.error(f"Please fill in: {', '.join(missing)}")
             else:
                 try:
-                    with st.spinner("Creating and aligning the JD with IPE band..."):
-                        jd_text, final_score, calc_details, banners, (min_ipe, max_ipe) = iterative_generate_and_lock(
+                    # Smart Option B flow:
+                    # 1) Create JD B first (input-driven). If it already lands in band, show only JD B.
+                    with st.spinner("Creating JD (input-driven) ..."):
+                        jd_input, score_input, details_input, banners_input, (min_ipe2, max_ipe2) = iterative_generate_and_lock(
                             jt, pu, br, rp, pr, fr, de, stak, td, bg, sr_selected,
                             sz, tm, gen_temp, eval_temp, max_revisions=4
                         )
-                        st.session_state.jd = jd_text
-                        st.session_state.jd_signature = make_signature()
+                    st.session_state.jd_input = jd_input
+                    st.session_state.jd_signature = make_signature()
+
+                    # Evaluate JD B for final display values
+                    scoreB, detailsB, _ = evaluate_job_from_jd(
+                        st.session_state.jd_input, sz, tm, br, eval_temperature=eval_temp, title_hint=jt
+                    )
+
+                    if _within_strict_band(scoreB, min_ipe2, max_ipe2):
+                        # Aligned case → single output
+                        st.subheader("✅ Aligned Output")
+                        st.markdown(f"### JD — Aligned with Estimated Band (Target {min_ipe2}–{max_ipe2})")
+                        st.text_area("Job Description", st.session_state.jd_input, height=360, key="jd_aligned_area")
+                        st.download_button("Download JD as Text", st.session_state.jd_input, file_name="job_description_aligned.txt")
+
+                        st.markdown("---")
+                        st.markdown("**IPE Evaluation**")
+                        job_levelB = map_job_level(scoreB)
+                        infoB = compute_points_and_ipe(
+                            rate_dimensions_from_jd_text(st.session_state.jd_input, eval_temp)[0], sz, tm, br
+                        )
+                        st.markdown(f"- Total Points: {infoB['total_pts']:.1f}")
+                        st.markdown(f"- IPE Score: **{scoreB}**")
+                        st.markdown(f"- Job Level: **{job_levelB}**")
+                        if banners_input:
+                            st.info(" ".join(banners_input))
+
+                    else:
+                        # Not aligned → also create JD A (strict-in-band), show both
+                        with st.spinner("Creating JD A (strict in estimated band) ..."):
+                            jd_strict, score_strict, details_strict, banners_strict, (min_ipe, max_ipe) = iterative_generate_strict_in_band(
+                                jt, pu, br, rp, pr, fr, de, stak, td, bg, sr_selected,
+                                sz, tm, gen_temp, eval_temp, max_revisions=12  # increased
+                            )
+                        st.session_state.jd_strict = jd_strict
+
+                        st.subheader("🧭 Dual Output (Option B)")
+                        c1, c2 = st.columns(2, gap="large")
+
+                        with c1:
+                            st.markdown(f"### JD A — Estimated-Band Version (Target {min_ipe}–{max_ipe})")
+                            st.text_area("Job Description (Strict in band)", st.session_state.jd_strict, height=360, key="jd_strict_area")
+                            st.download_button("Download JD A as Text", st.session_state.jd_strict, file_name="job_description_estimated_band.txt")
+
+                            st.markdown("---")
+                            st.markdown("**IPE Evaluation — JD A**")
+                            scoreA, detailsA, _ = evaluate_job_from_jd(
+                                st.session_state.jd_strict, sz, tm, br, eval_temperature=eval_temp, title_hint=jt
+                            )
+                            job_levelA = map_job_level(scoreA)
+                            infoA = compute_points_and_ipe(
+                                rate_dimensions_from_jd_text(st.session_state.jd_strict, eval_temp)[0], sz, tm, br
+                            )
+                            st.markdown(f"- Total Points: {infoA['total_pts']:.1f}")
+                            st.markdown(f"- IPE Score: **{scoreA}**")
+                            st.markdown(f"- Job Level: **{job_levelA}**")
+                            if scoreA == "" or not (min_ipe <= scoreA <= max_ipe):
+                                st.warning("JD A is intended to land strictly within the estimated band. Please review the text if this is not the case.")
+                            if banners_strict:
+                                st.info(" ".join(banners_strict))
+
+                        with c2:
+                            st.markdown(f"### JD B — Input-Driven Version (Estimate {min_ipe2}–{max_ipe2})")
+                            st.text_area("Job Description (Input-driven)", st.session_state.jd_input, height=360, key="jd_input_area")
+                            st.download_button("Download JD B as Text", st.session_state.jd_input, file_name="job_description_input_driven.txt")
+
+                            st.markdown("---")
+                            st.markdown("**IPE Evaluation — JD B**")
+                            job_levelB = map_job_level(scoreB)
+                            infoB = compute_points_and_ipe(
+                                rate_dimensions_from_jd_text(st.session_state.jd_input, eval_temp)[0], sz, tm, br
+                            )
+                            st.markdown(f"- Total Points: {infoB['total_pts']:.1f}")
+                            st.markdown(f"- IPE Score: **{scoreB}**")
+                            st.markdown(f"- Job Level: **{job_levelB}**")
+                            if banners_input:
+                                st.info(" ".join(banners_input))
+
                 except Exception as e:
-                    st.error(f"Failed to generate/evaluate JD: {e}")
+                    st.error(f"Failed to generate/evaluate JDs: {e}")
                     st.stop()
 
-                st.subheader("🔧 Generated Job Description")
-                st.text_area("Job Description", st.session_state.jd, height=360)
-                st.download_button("Download JD as Text", st.session_state.jd, file_name="job_description.txt")
-
-                st.markdown("---")
-                st.subheader(f"🏆 IPE Evaluation Result (Target band {min_ipe}–{max_ipe})")
-                st.markdown(calc_details.split("### Final Calculation")[0])  # Raw ratings + numeric lookup
-                st.markdown("### Final Calculation")
-                # Re-evaluate once more to print clean summary
-                score, details, _ = evaluate_job_from_jd(st.session_state.jd, sz, tm, br, eval_temperature=eval_temp, title_hint=jt)
-                job_level = map_job_level(score)
-                info_again = compute_points_and_ipe(rate_dimensions_from_jd_text(st.session_state.jd, eval_temp)[0], sz, tm, br)
-                st.markdown(f"- Total Points: {info_again['total_pts']:.1f}")
-                st.markdown(f"- IPE Score: **{score}**")
-                st.markdown(f"- Job Level: **{job_level}**")
-                if banners:
-                    st.info(" ".join(banners))
-
-        if st.session_state.jd and st.session_state.jd_signature is not None:
-            if st.session_state.jd_signature != make_signature():
-                st.warning("Inputs changed since JD generation. Click **Generate / Regenerate** to sync the JD.")
+                # Visual nudge if inputs changed after generation
+                if st.session_state.jd_signature != make_signature():
+                    st.warning("Inputs changed since JD generation. Click **Generate / Regenerate** to refresh the JD.")
 
     else:
         st.header("🔍 Evaluate an Existing Job Description")
         ex  = st.text_area("Paste Job Description Here:", height=320)
+
+        # Optional title to stabilize guardrails; prefill with last title if available
+        default_title = st.session_state.get("last_title", "")
+        ex_title = st.text_input("Job Title (optional, improves accuracy)", value=default_title)
+
         br_ex = st.selectbox("Breadth of Role (IPE):", list(BREADTH_VALUE_MAP.keys()), key="br_ex")
-        # Seniority is not required for evaluate-only, but we keep Org Context inputs consistent:
         sz_ex = st.slider("Size Score (1–13)", 1.0, 13.0, 7.0, step=0.5, key="sz_ex")
         tm_str_ex = st.selectbox("Team Responsibility:", [
             "1 - Individual Contributor","2 - Manager over Employees","3 - Manager over Managers"
@@ -1105,7 +1277,11 @@ def main():
             else:
                 try:
                     with st.spinner("Evaluating IPE level..."):
-                        score, details, _ = evaluate_job_from_jd(ex, sz_ex, tm_ex, br_ex, eval_temperature=eval_temp)
+                        score, details, _ = evaluate_job_from_jd(
+                            ex, sz_ex, tm_ex, br_ex,
+                            eval_temperature=eval_temp,
+                            title_hint=ex_title  # pass title to re-enable title-based guardrails
+                        )
                 except Exception as e:
                     st.error(f"Could not evaluate JD: {e}")
                     st.stop()
