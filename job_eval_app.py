@@ -325,7 +325,7 @@ def calculate_ipe_score(ratings: Dict, size: float) -> Tuple[Optional[int], Opti
     """Calculate IPE score from dimension ratings."""
     try:
         # Impact × Contribution → Intermediate
-        ic_intermediate = IMPACT_CONTRIBUTION_TABLE[int(ratings["impact"])][int(ratings["contribution"])]
+        ic_intermediate = IMPACT_CONTRIBUTION_TABLE[int(ratings["impact"])][ratings["contribution"]]
         
         # Intermediate × Size → Impact/Contribution Points
         ic_points = IMPACT_SIZE_TABLE[ic_intermediate][size]
